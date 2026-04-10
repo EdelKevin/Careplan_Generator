@@ -1,0 +1,18 @@
+{
+  "patient_first_name": "A.B.",
+  "patient_last_name": "Fictional",
+  "patient_mrn": "00012345",
+  "dob": "1979-06-08",
+  "primary_diagnosis": "G70.00",
+  "additional_diagnoses": ["I10", "K21.9"],
+  "medication_name": "IVIG",
+  "medication_history": [
+    "Pyridostigmine 60 mg PO q6h PRN",
+    "Prednisone 10 mg PO daily",
+    "Lisinopril 10 mg PO daily",
+    "Omeprazole 20 mg PO daily"
+  ],
+  "provider_name": "Referring Provider",
+  "provider_npi": "1234567890",
+  "patient_records": "Progressive proximal muscle weakness and ptosis over 2 weeks..."
+}

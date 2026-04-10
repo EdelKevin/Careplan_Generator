@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(docker-compose ps:*)",
+      "Bash(curl -s -X POST http://localhost:8000/api/orders/ -H \"Content-Type: application/json\" -d @payload.json)",
+      "Bash(curl -s http://localhost:8000/api/careplans/24/status/)",
+      "Bash(curl -s http://localhost:8000/api/careplans/24/)",
+      "Bash(curl -s http://localhost:8000/api/careplans/24/download/)"
+    ]
+  }
+}
