@@ -3,6 +3,7 @@ from django.shortcuts import render
 from django.views.decorators.csrf import csrf_exempt
 
 from . import serializers, services
+from .services import DuplicateBlockedError, DuplicateWarningError
 from app.careplans.models import CarePlanJob
 
 # views.py 的意义：前台接待员。负责接电话（收请求）、转给对应部门处理、
@@ -30,8 +31,15 @@ def create_order(request):
     except Exception:
         return JsonResponse({"error": "invalid json"}, status=400)
 
+    confirm = data.get("confirm", False)
+
     print("[views.py] 把 dict 交给 services 处理...")
-    provider, patient, order, job = services.create_order(data)
+    try:
+        provider, patient, order, job = services.create_order(data, confirm=confirm)
+    except DuplicateBlockedError as e:
+        return JsonResponse({"error": str(e)}, status=409)
+    except DuplicateWarningError as e:
+        return JsonResponse({"warning": str(e), "hint": "如确认要新建，请传入 confirm=true"}, status=409)
     print(f"[views.py] services 处理完毕，拿回 4 个对象: provider={provider}, patient={patient}, order={order}, job={job}")
 
     print("[views.py] 把对象交给 serializers 格式化成 JSON...")
