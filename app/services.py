@@ -8,6 +8,11 @@ from app.careplans.tasks import generate_care_plan_task
 # 负责写数据库、触发 Celery 任务。views 和 serializers 都不碰数据库，只有这里碰。
 
 
+class ServiceError(Exception):
+    """业务层抛出的错误，views 可以接住并返回给前端。"""
+    pass
+
+
 def create_order(data: dict):
     print("\n---------- [services.py] create_order ----------")
     print(f"[services.py] 收到 dict，开始写数据库...")
