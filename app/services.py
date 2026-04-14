@@ -1,4 +1,5 @@
 from django.db import transaction
+from django.utils import timezone
 
 from .models import Provider, Patient, Order
 from app.careplans.models import CarePlanJob
@@ -8,46 +9,151 @@ from app.careplans.tasks import generate_care_plan_task
 # 负责写数据库、触发 Celery 任务。views 和 serializers 都不碰数据库，只有这里碰。
 
 
-class ServiceError(Exception):
-    """业务层抛出的错误，views 可以接住并返回给前端。"""
-    pass
+# -----------------------------
+# Exceptions
+# -----------------------------
+
+class DuplicateBlockedError(Exception):
+    """必须阻止的重复，无法绕过 → 409"""
+    status_code = 409
 
 
-def create_order(data: dict):
+class DuplicateWarningError(Exception):
+    """重复警告，order 场景可传 confirm=True 跳过 → 409"""
+    status_code = 409
+
+
+# -----------------------------
+# Duplicate detection helpers
+# -----------------------------
+
+def _check_provider(npi: str, name: str) -> Provider | None:
+    existing = Provider.objects.filter(npi=npi).first()
+    if not existing:
+        return None
+
+    if existing.name == name:
+        return existing  # 完全一致，复用
+
+    raise DuplicateBlockedError(
+        f"NPI {npi} 已存在，绑定名字是 '{existing.name}'，"
+        f"与传入的 '{name}' 不一致。NPI 是全国唯一执照号，不能重复。"
+    )
+
+
+def _check_patient(mrn: str, first_name: str, last_name: str, dob) -> Patient | None:
+    by_mrn = Patient.objects.filter(mrn=mrn).first()
+    by_name_dob = (
+        Patient.objects.filter(first_name=first_name, last_name=last_name, dob=dob).first()
+        if dob else None
+    )
+
+    if by_mrn:
+        name_match = by_mrn.first_name == first_name and by_mrn.last_name == last_name
+        dob_match = str(by_mrn.dob) == str(dob)
+
+        if name_match and dob_match:
+            return by_mrn  # 完全一致，复用
+
+        raise DuplicateWarningError(
+            f"MRN {mrn} 已存在（Patient#{by_mrn.id}: {by_mrn.first_name} {by_mrn.last_name}, DOB {by_mrn.dob}），"
+            f"但与传入的姓名或DOB不一致，请核实。"
+        )
+
+    if by_name_dob:
+        raise DuplicateWarningError(
+            f"患者 {first_name} {last_name}（DOB {dob}）已存在（Patient#{by_name_dob.id}），"
+            f"但 MRN 不同：已有 {by_name_dob.mrn}，传入 {mrn}，请核实。"
+        )
+
+    return None
+
+
+def _check_order(patient: Patient, medication_name: str, confirm: bool) -> None:
+    today = timezone.now().date()
+
+    same_day = Order.objects.filter(
+        patient=patient,
+        medication_name=medication_name,
+        created_at__date=today,
+    ).first()
+
+    if same_day:
+        raise DuplicateBlockedError(
+            f"今天已为 {patient} 创建过 {medication_name} 的处方（Order#{same_day.id}），不能重复创建。"
+        )
+
+    if not confirm:
+        previous = Order.objects.filter(
+            patient=patient,
+            medication_name=medication_name,
+        ).first()
+
+        if previous:
+            raise DuplicateWarningError(
+                f"{patient} 之前已有 {medication_name} 的处方（Order#{previous.id}，{previous.created_at.date()}）。"
+                f"如确认要新建，请传入 confirm=true。"
+            )
+
+
+# -----------------------------
+# Order & job operations
+# -----------------------------
+
+def create_order(data: dict, confirm: bool = False):
     print("\n---------- [services.py] create_order ----------")
     print(f"[services.py] 收到 dict，开始写数据库...")
 
-    with transaction.atomic():
-        provider = Provider.objects.create(
-            name=data.get("provider_name", ""),
-            npi=data.get("provider_npi", ""),
-        )
-        print(f"[services.py] Provider 写入数据库，id={provider.id}, name={provider.name}")
+    npi        = data.get("provider_npi", "")
+    name       = data.get("provider_name", "")
+    mrn        = data.get("patient_mrn", "")
+    first_name = data.get("patient_first_name", "")
+    last_name  = data.get("patient_last_name", "")
+    dob        = data.get("dob") or None
+    medication = data.get("medication_name", "")
 
-        patient = Patient.objects.create(
-            first_name=data.get("patient_first_name", ""),
-            last_name=data.get("patient_last_name", ""),
-            mrn=data.get("patient_mrn", ""),
-            dob=data.get("dob") or None,
-            primary_diagnosis=data.get("primary_diagnosis", ""),
-            additional_diagnoses=data.get("additional_diagnoses", []) or [],
-            medication_history=data.get("medication_history", []) or [],
-        )
-        print(f"[services.py] Patient 写入数据库，id={patient.id}, name={patient.first_name} {patient.last_name}")
+    with transaction.atomic():
+
+        # --- Provider ---
+        provider = _check_provider(npi, name)
+        if provider is None:
+            provider = Provider.objects.create(name=name, npi=npi)
+            print(f"[services.py] Provider 新建，id={provider.id}, name={provider.name}")
+        else:
+            print(f"[services.py] Provider 复用，id={provider.id}, name={provider.name}")
+
+        # --- Patient ---
+        patient = _check_patient(mrn, first_name, last_name, dob)
+        if patient is None:
+            patient = Patient.objects.create(
+                first_name=first_name,
+                last_name=last_name,
+                mrn=mrn,
+                dob=dob,
+                primary_diagnosis=data.get("primary_diagnosis", ""),
+                additional_diagnoses=data.get("additional_diagnoses", []) or [],
+                medication_history=data.get("medication_history", []) or [],
+            )
+            print(f"[services.py] Patient 新建，id={patient.id}, name={patient.first_name} {patient.last_name}")
+        else:
+            print(f"[services.py] Patient 复用，id={patient.id}, name={patient.first_name} {patient.last_name}")
+
+        # --- Order ---
+        _check_order(patient, medication, confirm)
 
         order = Order.objects.create(
             patient=patient,
             provider=provider,
-            medication_name=data.get("medication_name", ""),
+            medication_name=medication,
             patient_records_text=data.get("patient_records", ""),
         )
-        print(f"[services.py] Order 写入数据库，id={order.id}, medication={order.medication_name}")
+        print(f"[services.py] Order 新建，id={order.id}, medication={order.medication_name}")
 
         job = CarePlanJob.objects.create(
             order=order,
             status=CarePlanJob.STATUS_PENDING,
         )
-        print(f"[services.py] CarePlanJob 写入数据库，id={job.id}, status={job.status}")
+        print(f"[services.py] CarePlanJob 新建，id={job.id}, status={job.status}")
 
         print(f"[services.py] 事务提交后，触发 Celery task，job_id={job.id}")
         transaction.on_commit(lambda: generate_care_plan_task.delay(job.id))
