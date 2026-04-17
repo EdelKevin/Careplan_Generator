@@ -46,6 +46,7 @@
       const [jobStatus, setJobStatus] = React.useState(null);
       const [carePlanText, setCarePlanText] = React.useState("");
       const [errorMsg, setErrorMsg] = React.useState("");
+      const [warning, setWarning] = React.useState(null); // {message, hint}
       const timerRef = React.useRef(null);
 
       function handleChange(e) {
@@ -63,14 +64,20 @@
         timerRef.current = setInterval(async () => {
           try {
             const res = await fetch(`/api/careplans/${id}/status/`);
-            const data = await res.json();
-            setJobStatus(data.status);
+            const body = await res.json();
 
-            if (data.status === "completed") {
-              setCarePlanText(data.care_plan_text);
+            if (!body.ok) {
+              setErrorMsg(body.error?.message || "Polling error.");
               stopPolling();
-            } else if (data.status === "failed") {
-              setErrorMsg(data.error || "Job failed.");
+              return;
+            }
+
+            setJobStatus(body.data.status);
+            if (body.data.status === "completed") {
+              setCarePlanText(body.data.care_plan_text);
+              stopPolling();
+            } else if (body.data.status === "failed") {
+              setErrorMsg(body.data.error || "Job failed.");
               stopPolling();
             }
           } catch (err) {
@@ -79,16 +86,18 @@
         }, 3000);
       }
 
-      async function handleSubmit(e) {
-        e.preventDefault();
+      // Core submit logic. confirmed=true skips duplicate warnings.
+      async function submitOrder(confirmed) {
         setSubmitting(true);
         setJobId(null);
         setJobStatus(null);
         setCarePlanText("");
         setErrorMsg("");
+        setWarning(null);
 
         const payload = {
           ...form,
+          confirm: confirmed,
           additional_diagnoses: form.additional_diagnoses
             ? form.additional_diagnoses.split(",").map(s => s.trim()).filter(Boolean)
             : [],
@@ -103,17 +112,34 @@
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify(payload),
           });
-          const data = await res.json();
-          if (!res.ok) throw new Error(data.error || "Submission failed");
+          const body = await res.json();
 
-          setJobId(data.job_id);
-          setJobStatus(data.status);
-          startPolling(data.job_id);
+          if (!body.ok) {
+            if (body.warnings) {
+              setWarning(body.warnings[0]); // {code, message, hint}
+            } else {
+              setErrorMsg(body.error?.message || "Submission failed.");
+            }
+            return;
+          }
+
+          setJobId(body.data.job_id);
+          setJobStatus(body.data.status);
+          startPolling(body.data.job_id);
         } catch (err) {
           setErrorMsg(err.message);
         } finally {
           setSubmitting(false);
         }
+      }
+
+      function handleSubmit(e) {
+        e.preventDefault();
+        submitOrder(false);
+      }
+
+      function handleConfirm() {
+        submitOrder(true);
       }
 
       React.useEffect(() => () => stopPolling(), []);
@@ -160,6 +186,22 @@
             </button>
           </form>
 
+          {warning && (
+            <div style={{ marginTop: 16, background: "#fef9c3", border: "1px solid #fcd34d", borderRadius: 6, padding: 12 }}>
+              <strong style={{ color: "#92400e" }}>Warning</strong>
+              <p style={{ margin: "6px 0", color: "#78350f" }}>{warning.message}</p>
+              {warning.hint && <p style={{ margin: "4px 0", fontSize: "0.85rem", color: "#92400e" }}>{warning.hint}</p>}
+              <button onClick={handleConfirm} disabled={submitting}
+                style={{ marginTop: 8, padding: "6px 16px", background: "#d97706", color: "#fff", border: "none", borderRadius: 4, cursor: "pointer" }}>
+                {submitting ? "Submitting..." : "Confirm and Proceed"}
+              </button>
+            </div>
+          )}
+
+          {errorMsg && (
+            <div className="error-box">{errorMsg}</div>
+          )}
+
           {jobId && (
             <div>
               <p style={{ marginTop: 20 }}>Job ID: <strong>{jobId}</strong></p>
@@ -182,10 +224,6 @@
                 <div className="error-box">{errorMsg}</div>
               )}
             </div>
-          )}
-
-          {!jobId && errorMsg && (
-            <div className="error-box">{errorMsg}</div>
           )}
         </div>
       );
