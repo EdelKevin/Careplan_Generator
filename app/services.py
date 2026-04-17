@@ -4,23 +4,10 @@ from django.utils import timezone
 from .models import Provider, Patient, Order
 from app.careplans.models import CarePlanJob
 from app.careplans.tasks import generate_care_plan_task
+from .exceptions import BlockError, WarningException
 
 # services.py 的意义：真正干活的人。接到翻译好的数据之后，
 # 负责写数据库、触发 Celery 任务。views 和 serializers 都不碰数据库，只有这里碰。
-
-
-# -----------------------------
-# Exceptions
-# -----------------------------
-
-class DuplicateBlockedError(Exception):
-    """必须阻止的重复，无法绕过 → 409"""
-    status_code = 409
-
-
-class DuplicateWarningError(Exception):
-    """重复警告，order 场景可传 confirm=True 跳过 → 409"""
-    status_code = 409
 
 
 # -----------------------------
@@ -35,9 +22,10 @@ def _check_provider(npi: str, name: str) -> Provider | None:
     if existing.name == name:
         return existing  # 完全一致，复用
 
-    raise DuplicateBlockedError(
+    raise BlockError(
         f"NPI {npi} 已存在，绑定名字是 '{existing.name}'，"
-        f"与传入的 '{name}' 不一致。NPI 是全国唯一执照号，不能重复。"
+        f"与传入的 '{name}' 不一致。NPI 是全国唯一执照号，不能重复。",
+        code="npi_name_conflict",
     )
 
 
@@ -55,15 +43,19 @@ def _check_patient(mrn: str, first_name: str, last_name: str, dob) -> Patient | 
         if name_match and dob_match:
             return by_mrn  # 完全一致，复用
 
-        raise DuplicateWarningError(
+        raise WarningException(
             f"MRN {mrn} 已存在（Patient#{by_mrn.id}: {by_mrn.first_name} {by_mrn.last_name}, DOB {by_mrn.dob}），"
-            f"但与传入的姓名或DOB不一致，请核实。"
+            f"但与传入的姓名或DOB不一致，请核实。",
+            code="mrn_data_mismatch",
+            hint="如确认要新建，请传入 confirm=true。",
         )
 
     if by_name_dob:
-        raise DuplicateWarningError(
+        raise WarningException(
             f"患者 {first_name} {last_name}（DOB {dob}）已存在（Patient#{by_name_dob.id}），"
-            f"但 MRN 不同：已有 {by_name_dob.mrn}，传入 {mrn}，请核实。"
+            f"但 MRN 不同：已有 {by_name_dob.mrn}，传入 {mrn}，请核实。",
+            code="name_dob_mrn_mismatch",
+            hint="如确认要新建，请传入 confirm=true。",
         )
 
     return None
@@ -79,8 +71,9 @@ def _check_order(patient: Patient, medication_name: str, confirm: bool) -> None:
     ).first()
 
     if same_day:
-        raise DuplicateBlockedError(
-            f"今天已为 {patient} 创建过 {medication_name} 的处方（Order#{same_day.id}），不能重复创建。"
+        raise BlockError(
+            f"今天已为 {patient} 创建过 {medication_name} 的处方（Order#{same_day.id}），不能重复创建。",
+            code="duplicate_order_today",
         )
 
     if not confirm:
@@ -90,9 +83,10 @@ def _check_order(patient: Patient, medication_name: str, confirm: bool) -> None:
         ).first()
 
         if previous:
-            raise DuplicateWarningError(
-                f"{patient} 之前已有 {medication_name} 的处方（Order#{previous.id}，{previous.created_at.date()}）。"
-                f"如确认要新建，请传入 confirm=true。"
+            raise WarningException(
+                f"{patient} 之前已有 {medication_name} 的处方（Order#{previous.id}，{previous.created_at.date()}）。",
+                code="duplicate_order_history",
+                hint="如确认要新建，请传入 confirm=true。",
             )
 
 
